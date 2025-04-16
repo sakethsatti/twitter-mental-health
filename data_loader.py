@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 from datasets import Dataset, DatasetDict
+from TweetNormalizer import normalizeTweet
 from typing import List, Dict, Union, Tuple, Optional
 
 # Constants
@@ -101,22 +102,16 @@ def load_tweets_file(filename: str, language: str, condition: str,
         df = pd.read_csv(file_path)
         
         # Identify the tweet text column
-        tweet_column = None
-        for col in df.columns:
-            if col.lower() in ['text', 'tweet', 'content']:
-                tweet_column = col
-                break
+        tweet_column = 'tweet'
         
-        if tweet_column is None:
-            # If no obvious column is found, use the first column
-            tweet_column = df.columns[0]
-        
-        # Create a list of tweet dictionaries
+        # Create a list of tweet dictionaries, normalizing each tweet
         tweets = []
         for _, row in df.iterrows():
+            raw_tweet = row[tweet_column]
+            cleaned_tweet = normalizeTweet(str(raw_tweet)) if pd.notnull(raw_tweet) else ""
             tweets.append({
-                'tweet': row[tweet_column],
-                'class': condition,  # Keep original case for class labels
+                'tweet': cleaned_tweet,
+                'class': condition,  
                 'language': language
             })
         
