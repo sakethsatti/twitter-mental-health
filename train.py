@@ -27,7 +27,7 @@ def parse_args():
                         help='Mental health group to analyze')
     parser.add_argument('--folds', type=str, default='1,2,3,4,5',
                         help='Comma-separated list of folds to train on')
-    parser.add_argument('--batch_size', type=int, default=16,
+    parser.add_argument('--batch_size', type=int, default=128,
                         help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=3,
                         help='Number of training epochs')
