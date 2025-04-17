@@ -6,16 +6,16 @@ class WeightedTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.class_weights = class_weights
 
-    def compute_loss(self, model, inputs, return_outputs=False):
-        # grab labels (you stored them under "label")
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        
         labels = inputs.get("labels", inputs.get("label"))
-        # forward pass (drop label so model doesn't double‐expect it)
+    
         inputs_for_model = {k: v for k, v in inputs.items() if k not in ("label", "labels")}
         outputs = model(**inputs_for_model)
         logits = outputs.logits
-        # build loss fn with weights on the same device
+
         if self.class_weights is not None:
-            cw = self.class_weights.to(logits.device)
+            cw = self.class_weights.to(logits.device).to(logits.dtype)
             loss_fct = torch.nn.CrossEntropyLoss(weight=cw)
         else:
             loss_fct = torch.nn.CrossEntropyLoss()

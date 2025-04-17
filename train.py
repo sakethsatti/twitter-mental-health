@@ -1,24 +1,23 @@
 import os
 import argparse
 import pandas as pd
+import numpy as np
+import torch
 from transformers import (
-    AutoTokenizer,
+    AutoTokenizer, 
     AutoModelForSequenceClassification,
-    Trainer,
+    Trainer, 
     TrainingArguments,
     EarlyStoppingCallback
 )
 from datetime import datetime
-import torch
-import numpy as np
-from sklearn.utils.class_weight import compute_class_weight
-from weighted_trainer import WeightedTrainer
 
 from data_loader import load_fold, get_conditions_by_group, GROUPS
 from data_tests import (
     compute_metrics, 
     plot_confusion_matrix,
 )
+from weighted_trainer import WeightedTrainer
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a BERT model on mental health tweets')
@@ -41,9 +40,8 @@ def parse_args():
                         help='Maximum sequence length')
     parser.add_argument('--output_dir', type=str, default='./results',
                         help='Directory to save results')
-    parser.add_argument('--use_weighted',action='store_true',
-        help='Enable weighted cross-entropy loss based on train-set class frequencies'
-    )
+    parser.add_argument('--weighted_training', action='store_true', default=True,
+                    help='Use weighted training to handle class imbalance (enabled by default)')
     return parser.parse_args()
 
 def preprocess_dataset(dataset, tokenizer, max_length, text_column="tweet", conditions=None):
@@ -89,46 +87,33 @@ def train_fold(fold, args):
     dataset_dict = load_fold(fold, args.language, args.group)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     train_dataset, label_mapping = preprocess_dataset(
-        dataset_dict["train"],
-        tokenizer,
+        dataset_dict["train"], 
+        tokenizer, 
         args.max_length,
         conditions=conditions
     )
+
     eval_dataset, _ = preprocess_dataset(
-        dataset_dict["test"],
-        tokenizer,
+        dataset_dict["test"], 
+        tokenizer, 
         args.max_length,
         conditions=conditions
     )
 
-    # save mapping, build label_list
     label_list = [k for k, v in sorted(label_mapping.items(), key=lambda item: item[1])]
+    with open(os.path.join(fold_output_dir, 'label_mapping.txt'), 'w') as f:
+        for label, idx in label_mapping.items():
+            f.write(f"{label}: {idx}\n")
+    
     num_labels = len(label_mapping)
-
-    if args.use_weighted:
-        labels = train_dataset["label"]
-        class_weights_np = compute_class_weight(
-            "balanced",
-            classes=np.arange(num_labels),
-            y=labels
-        )
-        class_weights = torch.tensor(class_weights_np, dtype=torch.float)
-    else:
-        class_weights = None
-
     model = AutoModelForSequenceClassification.from_pretrained(
-        args.model_name,
-        num_labels=num_labels
-    )
-
-    model = AutoModelForSequenceClassification.from_pretrained(
-        args.model_name,
+        args.model_name, 
         num_labels=num_labels
     )
 
     training_args = TrainingArguments(
         output_dir=os.path.join(fold_output_dir, 'checkpoints'),
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         learning_rate=args.learning_rate,
         per_device_train_batch_size=args.batch_size,
@@ -141,15 +126,50 @@ def train_fold(fold, args):
         report_to="none",
     )
 
-    trainer = WeightedTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
-        class_weights=class_weights
-    )
+    # Choose appropriate trainer based on arguments
+    if args.weighted_training:
+        # Calculate class weights based on training data distribution
+        label_counts = {}
+        for item in train_dataset:
+            label = item["label"].item()
+            label_counts[label] = label_counts.get(label, 0) + 1
+        
+        # Convert to numpy array with proper indices
+        num_classes = len(label_mapping)
+        class_counts = np.zeros(num_classes)
+        for label, count in label_counts.items():
+            class_counts[label] = count
+        
+        # Check for classes with zero samples to avoid division by zero
+        if 0 in class_counts:
+            print("Warning: Some classes have zero samples. Using uniform weights for all classes.")
+            class_weights = torch.ones(num_classes, dtype=torch.float32)
+        else:
+            # Compute weights inversely proportional to class frequencies
+            class_weights = torch.tensor(1.0 / class_counts, dtype=torch.float32)
+            # Normalize weights so they sum to number of classes
+            class_weights = class_weights * (num_classes / class_weights.sum())
+        
+        print(f"Using weighted training with weights: {class_weights.tolist()}")
+        
+        trainer = WeightedTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            compute_metrics=compute_metrics,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+            class_weights=class_weights
+        )
+    else:
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            compute_metrics=compute_metrics,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
+        )
 
     train_result = trainer.train()
     trainer.save_model(os.path.join(fold_output_dir, 'final_model'))

@@ -19,7 +19,7 @@ GROUPS = {
         "DEPRESSION", "EATING", "OCD", "PTSD", "SCHIZOPHRENIA"
     ],
     "internalizing": [
-        "ANXIETY", "BIPOLAR", "DEPRESSION", "PTSD", "CONTROL"
+        "ANXIETY", "BIPOLAR", "DEPRESSION", "PTSD", "CONTR"
     ],
     "cognitive_attention": [
         "ADHD", "ASD", "CONTROL"
@@ -67,7 +67,8 @@ def get_fold_data(df: pd.DataFrame, fold: int, split: str) -> pd.DataFrame:
     return df[df['partition'] == partition_value].copy()
 
 def load_tweets_file(filename: str, language: str, condition: str, 
-                    timelines_dir: str = TIMELINES_DIR) -> List[Dict]:
+                    timelines_dir: str = TIMELINES_DIR,
+                    normalize: bool = True) -> List[Dict]:
     """
     Load all tweets from a specific file and label them with the condition
     
@@ -76,6 +77,7 @@ def load_tweets_file(filename: str, language: str, condition: str,
         language: Language code ("eng" or "esp")
         condition: Mental health condition to label the tweets with
         timelines_dir: Base directory for timeline files
+        normalize: Whether to normalize tweets (default: True)
         
     Returns:
         List of dictionaries with tweet data
@@ -104,16 +106,19 @@ def load_tweets_file(filename: str, language: str, condition: str,
         # Identify the tweet text column
         tweet_column = 'tweet'
         
-        # Create a list of tweet dictionaries, normalizing each tweet
+        # Create a list of tweet dictionaries
         tweets = []
         for _, row in df.iterrows():
             raw_tweet = row[tweet_column]
-            cleaned_tweet = normalizeTweet(str(raw_tweet)) if pd.notnull(raw_tweet) else ""
-            tweets.append({
-                'tweet': cleaned_tweet,
-                'class': condition,  
-                'language': language
-            })
+            if pd.notnull(raw_tweet):
+                # Only normalize if requested
+                tweet_text = normalizeTweet(str(raw_tweet)) if normalize else str(raw_tweet)
+                tweets.append({
+                    'tweet': tweet_text,
+                    'class': condition,  
+                    'language': language,
+                    'user_filename': filename  # Add filename for grouping
+                })
         
         return tweets
     
@@ -210,35 +215,80 @@ def load_fold(fold: int, language: str = "eng", group: str = "all",
     train_df = get_fold_data(partition_df, fold, "train")
     test_df = get_fold_data(partition_df, fold, "test")
     
-    # Process train data
+    # Undersample at the user level first if requested
+    if undersample_control and group != "all":
+        # Count users per class
+        class_user_counts = train_df['class'].value_counts().to_dict()
+        
+        # Find the largest minority class
+        minority_classes = {k: v for k, v in class_user_counts.items() if k != "CONTROL"}
+        if minority_classes:
+            largest_minority_class = max(minority_classes.items(), key=lambda x: x[1])
+            largest_minority_count = largest_minority_class[1]
+            
+            # Undersample CONTROL users
+            if "CONTROL" in class_user_counts and class_user_counts["CONTROL"] > largest_minority_count:
+                print(f"\nUndersampling CONTROL users for training set:")
+                print(f"  Before: {class_user_counts['CONTROL']} CONTROL users")
+                
+                control_users = train_df[train_df['class'] == "CONTROL"]
+                non_control_users = train_df[train_df['class'] != "CONTROL"]
+                
+                # Randomly sample CONTROL users
+                import random
+                random.seed(random_state)
+                sampled_control = control_users.sample(n=largest_minority_count, random_state=random_state)
+                
+                # Combine and update train_df
+                train_df = pd.concat([non_control_users, sampled_control])
+                print(f"  After: {len(sampled_control)} CONTROL users")
+        
+        # Do the same for test set
+        class_user_counts = test_df['class'].value_counts().to_dict()
+        minority_classes = {k: v for k, v in class_user_counts.items() if k != "CONTROL"}
+        if minority_classes:
+            largest_minority_class = max(minority_classes.items(), key=lambda x: x[1])
+            largest_minority_count = largest_minority_class[1]
+            
+            if "CONTROL" in class_user_counts and class_user_counts["CONTROL"] > largest_minority_count:
+                print(f"\nUndersampling CONTROL users for testing set:")
+                print(f"  Before: {class_user_counts['CONTROL']} CONTROL users")
+                
+                control_users = test_df[test_df['class'] == "CONTROL"]
+                non_control_users = test_df[test_df['class'] != "CONTROL"]
+                
+                import random
+                random.seed(random_state)
+                sampled_control = control_users.sample(n=largest_minority_count, random_state=random_state)
+                
+                test_df = pd.concat([non_control_users, sampled_control])
+                print(f"  After: {len(sampled_control)} CONTROL users")
+    
+    # Process train data - load tweets without normalization first
+    print("Loading train data...")
     train_data = []
     for _, row in train_df.iterrows():
         tweets = load_tweets_file(
             filename=row['filename'],
             language=language,
             condition=row['class'],
-            timelines_dir=os.path.join(base_dir, "Timelines")
+            timelines_dir=os.path.join(base_dir, "Timelines"),
+            normalize=True  # Now normalize during loading
         )
         train_data.extend(tweets)
     
-    # Process test data
+    # Process test data - load tweets without normalization first
+    print("Loading test data...")
     test_data = []
     for _, row in test_df.iterrows():
         tweets = load_tweets_file(
             filename=row['filename'],
             language=language,
             condition=row['class'],
-            timelines_dir=os.path.join(base_dir, "Timelines")
+            timelines_dir=os.path.join(base_dir, "Timelines"),
+            normalize=True  # Now normalize during loading
         )
         test_data.extend(tweets)
-    
-    # Undersample control class if requested and if we're not using all classes
-    if undersample_control and group != "all":
-        print(f"\nUndersampling CONTROL class for training set:")
-        train_data = undersample_majority_class(train_data, random_state=random_state)
-        
-        print(f"\nUndersampling CONTROL class for testing set:")
-        test_data = undersample_majority_class(test_data, random_state=random_state)
     
     # Create HuggingFace datasets
     train_dataset = Dataset.from_list(train_data)
