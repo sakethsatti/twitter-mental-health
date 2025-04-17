@@ -2,13 +2,17 @@ import os
 import argparse
 import pandas as pd
 from transformers import (
-    AutoTokenizer, 
+    AutoTokenizer,
     AutoModelForSequenceClassification,
-    Trainer, 
+    Trainer,
     TrainingArguments,
     EarlyStoppingCallback
 )
 from datetime import datetime
+import torch
+import numpy as np
+from sklearn.utils.class_weight import compute_class_weight
+from weighted_trainer import WeightedTrainer
 
 from data_loader import load_fold, get_conditions_by_group, GROUPS
 from data_tests import (
@@ -37,6 +41,9 @@ def parse_args():
                         help='Maximum sequence length')
     parser.add_argument('--output_dir', type=str, default='./results',
                         help='Directory to save results')
+    parser.add_argument('--use_weighted',action='store_true',
+        help='Enable weighted cross-entropy loss based on train-set class frequencies'
+    )
     return parser.parse_args()
 
 def preprocess_dataset(dataset, tokenizer, max_length, text_column="tweet", conditions=None):
@@ -82,27 +89,40 @@ def train_fold(fold, args):
     dataset_dict = load_fold(fold, args.language, args.group)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     train_dataset, label_mapping = preprocess_dataset(
-        dataset_dict["train"], 
-        tokenizer, 
+        dataset_dict["train"],
+        tokenizer,
         args.max_length,
         conditions=conditions
     )
-
     eval_dataset, _ = preprocess_dataset(
-        dataset_dict["test"], 
-        tokenizer, 
+        dataset_dict["test"],
+        tokenizer,
         args.max_length,
         conditions=conditions
     )
 
+    # save mapping, build label_list
     label_list = [k for k, v in sorted(label_mapping.items(), key=lambda item: item[1])]
-    with open(os.path.join(fold_output_dir, 'label_mapping.txt'), 'w') as f:
-        for label, idx in label_mapping.items():
-            f.write(f"{label}: {idx}\n")
-    
     num_labels = len(label_mapping)
+
+    if args.use_weighted:
+        labels = train_dataset["label"]
+        class_weights_np = compute_class_weight(
+            "balanced",
+            classes=np.arange(num_labels),
+            y=labels
+        )
+        class_weights = torch.tensor(class_weights_np, dtype=torch.float)
+    else:
+        class_weights = None
+
     model = AutoModelForSequenceClassification.from_pretrained(
-        args.model_name, 
+        args.model_name,
+        num_labels=num_labels
+    )
+
+    model = AutoModelForSequenceClassification.from_pretrained(
+        args.model_name,
         num_labels=num_labels
     )
 
@@ -120,13 +140,15 @@ def train_fold(fold, args):
         push_to_hub=False,
         report_to="none",
     )
-    trainer = Trainer(
+
+    trainer = WeightedTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+        class_weights=class_weights
     )
 
     train_result = trainer.train()
