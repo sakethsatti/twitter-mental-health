@@ -180,7 +180,7 @@ def undersample_majority_class(data: List[Dict], majority_class: str = "CONTROL"
     return majority_samples + minority_samples
 
 def load_fold(fold: int, language: str = "eng", group: str = "all",
-             base_dir: str = BASE_DIR, undersample_control: bool = True, 
+             base_dir: str = BASE_DIR, balance_level: str = "none", 
              random_state: int = 626) -> DatasetDict:
     """
     Load data for a specific fold and language, filtered by mental health group
@@ -190,8 +190,11 @@ def load_fold(fold: int, language: str = "eng", group: str = "all",
         language: Language code ("eng" or "esp")
         group: Mental health group to include
         base_dir: Base directory for the dataset
-        undersample_control: Whether to undersample the CONTROL class
-        random_state: Random seed for reproducibility in undersampling
+        balance_level: Class balancing strategy:
+            - "none": No balancing
+            - "partial": Majority class reduced to size of largest minority class
+            - "full": All classes reduced to size of smallest class
+        random_state: Random seed for reproducibility in sampling
         
     Returns:
         DatasetDict with 'train' and 'test' splits
@@ -201,6 +204,9 @@ def load_fold(fold: int, language: str = "eng", group: str = "all",
     
     if language not in LANGUAGES:
         raise ValueError(f"Language must be one of {LANGUAGES}")
+    
+    if balance_level not in ["none", "partial", "full"]:
+        raise ValueError("balance_level must be 'none', 'partial', or 'full'")
     
     # Get conditions for the specified group
     conditions = get_conditions_by_group(group)
@@ -215,56 +221,94 @@ def load_fold(fold: int, language: str = "eng", group: str = "all",
     train_df = get_fold_data(partition_df, fold, "train")
     test_df = get_fold_data(partition_df, fold, "test")
     
-    # Undersample at the user level first if requested
-    if undersample_control and group != "all":
-        # Count users per class
-        class_user_counts = train_df['class'].value_counts().to_dict()
-        
-        # Find the largest minority class
-        minority_classes = {k: v for k, v in class_user_counts.items() if k != "CONTROL"}
-        if minority_classes:
-            largest_minority_class = max(minority_classes.items(), key=lambda x: x[1])
-            largest_minority_count = largest_minority_class[1]
-            
-            # Undersample CONTROL users
-            if "CONTROL" in class_user_counts and class_user_counts["CONTROL"] > largest_minority_count:
-                print(f"\nUndersampling CONTROL users for training set:")
-                print(f"  Before: {class_user_counts['CONTROL']} CONTROL users")
-                
-                control_users = train_df[train_df['class'] == "CONTROL"]
-                non_control_users = train_df[train_df['class'] != "CONTROL"]
-                
-                # Randomly sample CONTROL users
-                import random
-                random.seed(random_state)
-                sampled_control = control_users.sample(n=largest_minority_count, random_state=random_state)
-                
-                # Combine and update train_df
-                train_df = pd.concat([non_control_users, sampled_control])
-                print(f"  After: {len(sampled_control)} CONTROL users")
-        
-        # Do the same for test set
-        class_user_counts = test_df['class'].value_counts().to_dict()
-        minority_classes = {k: v for k, v in class_user_counts.items() if k != "CONTROL"}
-        if minority_classes:
-            largest_minority_class = max(minority_classes.items(), key=lambda x: x[1])
-            largest_minority_count = largest_minority_class[1]
-            
-            if "CONTROL" in class_user_counts and class_user_counts["CONTROL"] > largest_minority_count:
-                print(f"\nUndersampling CONTROL users for testing set:")
-                print(f"  Before: {class_user_counts['CONTROL']} CONTROL users")
-                
-                control_users = test_df[test_df['class'] == "CONTROL"]
-                non_control_users = test_df[test_df['class'] != "CONTROL"]
-                
-                import random
-                random.seed(random_state)
-                sampled_control = control_users.sample(n=largest_minority_count, random_state=random_state)
-                
-                test_df = pd.concat([non_control_users, sampled_control])
-                print(f"  After: {len(sampled_control)} CONTROL users")
+    # Print class distribution for information
+    class_user_counts = train_df['class'].value_counts().to_dict()
+    print(f"\nOriginal class distribution in training set (users):")
+    for cls, count in class_user_counts.items():
+        print(f"  {cls}: {count} users")
     
-    # Process train data - load tweets without normalization first
+    # Apply class balancing based on strategy
+    if balance_level != "none" and len(conditions) > 1:
+        # Import random here
+        import random
+        random.seed(random_state)
+        
+        # For both "partial" and "full" strategies
+        if balance_level == "partial":
+            # Find majority class and largest minority class
+            majority_class = max(class_user_counts.items(), key=lambda x: x[1])[0]
+            
+            # Find the largest minority class
+            minority_classes = {k: v for k, v in class_user_counts.items() if k != majority_class}
+            largest_minority_class = max(minority_classes.items(), key=lambda x: x[1])
+            largest_minority_name, largest_minority_count = largest_minority_class
+            
+            print(f"\nPartial balancing: Reducing {majority_class} to match {largest_minority_name} ({largest_minority_count} users)")
+            
+            # Create a balanced dataset by undersampling only the majority class
+            majority_users = train_df[train_df['class'] == majority_class]
+            non_majority_users = train_df[train_df['class'] != majority_class]
+            
+            if len(majority_users) > largest_minority_count:
+                sampled_majority = majority_users.sample(n=largest_minority_count, random_state=random_state)
+                train_df = pd.concat([non_majority_users, sampled_majority])
+            
+            # Same for test set
+            class_user_counts = test_df['class'].value_counts().to_dict()
+            if majority_class in class_user_counts:
+                majority_users = test_df[test_df['class'] == majority_class]
+                non_majority_users = test_df[test_df['class'] != majority_class]
+                
+                # Find the largest minority class in test set
+                minority_classes = {k: v for k, v in class_user_counts.items() if k != majority_class}
+                if minority_classes:
+                    largest_minority_count = max(minority_classes.values())
+                    
+                    if len(majority_users) > largest_minority_count:
+                        sampled_majority = majority_users.sample(n=largest_minority_count, random_state=random_state)
+                        test_df = pd.concat([non_majority_users, sampled_majority])
+        
+        elif balance_level == "full":
+            # Find the smallest class
+            smallest_class_count = min(class_user_counts.values())
+            smallest_class = min(class_user_counts.items(), key=lambda x: x[1])[0]
+            print(f"\nFull balancing: Reducing all classes to match smallest class {smallest_class} ({smallest_class_count} users)")
+            
+            # Create a fully balanced dataset with equal users per class
+            balanced_train_df = pd.DataFrame()
+            
+            for class_name in conditions:
+                class_users = train_df[train_df['class'] == class_name]
+                if len(class_users) > smallest_class_count:
+                    sampled_users = class_users.sample(n=smallest_class_count, random_state=random_state)
+                    balanced_train_df = pd.concat([balanced_train_df, sampled_users])
+                else:
+                    balanced_train_df = pd.concat([balanced_train_df, class_users])
+            
+            train_df = balanced_train_df
+            
+            # Same for test set
+            class_user_counts = test_df['class'].value_counts().to_dict()
+            smallest_class_count = min(class_user_counts.values())
+            
+            balanced_test_df = pd.DataFrame()
+            for class_name in conditions:
+                class_users = test_df[test_df['class'] == class_name]
+                if len(class_users) > smallest_class_count:
+                    sampled_users = class_users.sample(n=smallest_class_count, random_state=random_state)
+                    balanced_test_df = pd.concat([balanced_test_df, sampled_users])
+                else:
+                    balanced_test_df = pd.concat([balanced_test_df, class_users])
+            
+            test_df = balanced_test_df
+    
+    # Print final class distribution
+    class_user_counts = train_df['class'].value_counts().to_dict()
+    print(f"\nFinal class distribution in training set (users):")
+    for cls, count in class_user_counts.items():
+        print(f"  {cls}: {count} users")
+    
+    # Process train data
     print("Loading train data...")
     train_data = []
     for _, row in train_df.iterrows():
@@ -273,11 +317,11 @@ def load_fold(fold: int, language: str = "eng", group: str = "all",
             language=language,
             condition=row['class'],
             timelines_dir=os.path.join(base_dir, "Timelines"),
-            normalize=True  # Now normalize during loading
+            normalize=True
         )
         train_data.extend(tweets)
     
-    # Process test data - load tweets without normalization first
+    # Process test data
     print("Loading test data...")
     test_data = []
     for _, row in test_df.iterrows():
@@ -286,7 +330,7 @@ def load_fold(fold: int, language: str = "eng", group: str = "all",
             language=language,
             condition=row['class'],
             timelines_dir=os.path.join(base_dir, "Timelines"),
-            normalize=True  # Now normalize during loading
+            normalize=True
         )
         test_data.extend(tweets)
     

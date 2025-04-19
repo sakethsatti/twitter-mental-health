@@ -40,8 +40,14 @@ def parse_args():
                         help='Maximum sequence length')
     parser.add_argument('--output_dir', type=str, default='./results',
                         help='Directory to save results')
-    parser.add_argument('--weighted_training', action='store_true', default=True,
+    parser.add_argument('--weighted_training', action='store_true', default=False,
                     help='Use weighted training to handle class imbalance (enabled by default)')
+    parser.add_argument('--balance_level', type=str, default='full', 
+                        choices=['none', 'partial', 'full'],
+                        help='''Data balancing strategy: 
+                                "none": No balancing, 
+                                "partial": Majority class reduced to size of largest minority class, 
+                                "full": All classes reduced to size of smallest class''')
     return parser.parse_args()
 
 def preprocess_dataset(dataset, tokenizer, max_length, text_column="tweet", conditions=None):
@@ -84,7 +90,10 @@ def train_fold(fold, args):
     conditions = get_conditions_by_group(args.group)
     
     print(f"Using conditions: {conditions}")
-    dataset_dict = load_fold(fold, args.language, args.group)
+    dataset_dict = load_fold(fold, 
+                            language=args.language, 
+                            group=args.group, 
+                            balance_level=args.balance_level)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     train_dataset, label_mapping = preprocess_dataset(
         dataset_dict["train"], 
@@ -108,7 +117,9 @@ def train_fold(fold, args):
     num_labels = len(label_mapping)
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name, 
-        num_labels=num_labels
+        num_labels=num_labels,
+        hidden_dropout_prob=0.2,
+        attention_probs_dropout_prob=0.2
     )
 
     training_args = TrainingArguments(
@@ -140,9 +151,19 @@ def train_fold(fold, args):
         for label, count in label_counts.items():
             class_counts[label] = count
         
+        # Create a reverse mapping from index to class name for better reporting
+        idx_to_label = {idx: label for label, idx in label_mapping.items()}
+        
+        # Print class distribution before weighting
+        print("\nClass distribution in training data:")
+        for label_idx in range(num_classes):
+            class_name = idx_to_label[label_idx]
+            count = class_counts[label_idx]
+            print(f"  {class_name}: {int(count)} samples")
+        
         # Check for classes with zero samples to avoid division by zero
         if 0 in class_counts:
-            print("Warning: Some classes have zero samples. Using uniform weights for all classes.")
+            print("\nWarning: Some classes have zero samples. Using uniform weights for all classes.")
             class_weights = torch.ones(num_classes, dtype=torch.float32)
         else:
             # Compute weights inversely proportional to class frequencies
@@ -150,7 +171,12 @@ def train_fold(fold, args):
             # Normalize weights so they sum to number of classes
             class_weights = class_weights * (num_classes / class_weights.sum())
         
-        print(f"Using weighted training with weights: {class_weights.tolist()}")
+        # Print the weights with corresponding class names
+        print("\nClass weights for training:")
+        for label_idx in range(num_classes):
+            class_name = idx_to_label[label_idx]
+            weight = class_weights[label_idx].item()
+            print(f"  {class_name}: {weight:.4f}")
         
         trainer = WeightedTrainer(
             model=model,
