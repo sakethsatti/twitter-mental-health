@@ -48,6 +48,8 @@ def parse_args():
                                 "none": No balancing, 
                                 "partial": Majority class reduced to size of largest minority class, 
                                 "full": All classes reduced to size of smallest class''')
+    parser.add_argument('--dropout', type=float, default=0.2,
+                        help='Dropout rate for hidden and attention layers')
     return parser.parse_args()
 
 def preprocess_dataset(dataset, tokenizer, max_length, text_column="tweet", conditions=None):
@@ -118,8 +120,8 @@ def train_fold(fold, args):
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name, 
         num_labels=num_labels,
-        hidden_dropout_prob=0.2,
-        attention_probs_dropout_prob=0.2
+        hidden_dropout_prob=args.dropout,
+        attention_probs_dropout_prob=args.dropout
     )
 
     training_args = TrainingArguments(
