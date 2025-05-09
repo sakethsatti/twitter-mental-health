@@ -2,3 +2,6 @@ tweets/
 __pycache__/
 results/
 syntactic_analysis/
+*.csv
+*.zip
+*.out
